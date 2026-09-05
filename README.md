@@ -1,16 +1,10 @@
-# Faculty AI Explorer — Python wrapper around the working HTML
+# Faculty AI Explorer — Python/Flask Security Version
 
-This version deliberately does **not** re-implement authentication in Python.
-It serves the already-working HTML pages unchanged so the same Supabase logic is used.
+This package serves the existing Faculty AI Explorer and the latest secure Admin HTML from Flask.
 
-- `/` serves `public/index.html`
-- `/admin/` serves `public/admin.html`
-- Admin login uses the existing database User ID + Password flow via the Supabase RPC `verify_admin_login`.
-
-## Run on macOS
+## Local run (Mac)
 
 ```bash
-cd faculty_ai_python_working_html
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt
@@ -18,12 +12,33 @@ python3 -m flask --app app run --debug --port 5001
 ```
 
 Open:
-- http://127.0.0.1:5001/
-- http://127.0.0.1:5001/admin/
+- Main site: http://127.0.0.1:5001/
+- Admin: http://127.0.0.1:5001/admin/
 
-## Important
+## Render
 
-Use the **same User ID + Password** that works in `Admin_Users_Hashed_Password.html`.
-Do not use email login for this version.
+Build command:
 
-If the database RPC/table setup has not been run, run `database_setup.sql` in Supabase SQL Editor first.
+```bash
+pip install -r requirements.txt
+```
+
+Start command:
+
+```bash
+gunicorn app:app
+```
+
+## Included admin protections
+
+- Existing hashed-password Supabase RPC login
+- Excel preview/import
+- Exact duplicate Excel import blocking
+- Blank Excel cells do not overwrite existing database values
+- Auto logout after inactivity
+- Login-attempt temporary lockout
+- URL/query/hash cleanup
+- No-cache browser headers
+- Anti-framing and basic browser security headers
+
+The Supabase publishable key remains browser-visible by design. Security for database access must still be enforced with Supabase RLS/RPC permissions. Never place a Supabase service-role key in these HTML files.

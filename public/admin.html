@@ -3,6 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' https://qmlguyfmipslinbaqcgh.supabase.co; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self';">
   <title>Admin Users</title>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -349,16 +354,17 @@
       <h1>Admin Users</h1>
       <p class="login-subtitle">Administration</p>
       <p class="muted">Sign in with your User ID and Password.</p>
+      <p class="muted" style="font-size:12px">Security: direct/reloaded links require login again · automatic logout after 10 minutes inactive · 5 failed attempts temporarily lock this tab.</p>
 
       <form id="loginForm">
         <div class="field">
           <label for="loginUsername">User ID</label>
-          <input id="loginUsername" type="text" required autocomplete="username" placeholder="admin">
+          <input id="loginUsername" type="text" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="admin">
         </div>
 
         <div class="field">
           <label for="loginPassword">Password</label>
-          <input id="loginPassword" type="password" required autocomplete="current-password">
+          <input id="loginPassword" type="password" required autocomplete="off">
         </div>
 
         <button class="btn" type="submit">Login</button>
@@ -399,6 +405,7 @@
         <div class="topline">
           <h2>Faculty Records</h2>
           <span class="spacer"></span>
+          <button id="uploadExcelBtn" class="btn secondary">Upload Excel</button>
           <button id="exportBtn" class="btn">Download Excel</button>
         </div>
 
@@ -473,6 +480,32 @@
     </div>
   </div>
 
+  <div id="excelUploadModal" class="modal hidden">
+    <div class="modal-card" style="width:min(980px,100%)">
+      <h2>Upload Faculty Excel</h2>
+      <p class="muted">Select the Microsoft Forms Excel file. Existing records are matched by email and updated; new emails are inserted. Rows without the required consent are skipped.</p>
+
+      <div class="field">
+        <label for="excelFileInput">Excel file (.xlsx / .xls)</label>
+        <input id="excelFileInput" type="file" accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel">
+      </div>
+
+      <div id="excelSummary" class="admin-note hidden"></div>
+      <div id="excelPreviewWrap" class="table-wrap hidden" style="max-height:360px;overflow:auto">
+        <table>
+          <thead><tr><th>Row</th><th>Name</th><th>Email</th><th>Department</th><th>Status</th></tr></thead>
+          <tbody id="excelPreviewBody"></tbody>
+        </table>
+      </div>
+
+      <div class="modal-actions">
+        <button id="importExcelBtn" class="btn hidden" type="button">Import to Database</button>
+        <button id="closeExcelUpload" class="btn secondary" type="button">Cancel</button>
+      </div>
+      <div id="excelUploadMsg" class="msg"></div>
+    </div>
+  </div>
+
   <div id="addAdminModal" class="modal hidden">
     <div class="modal-card" style="width:min(560px,100%)">
       <h2>Add Admin User</h2>
@@ -514,6 +547,79 @@
     let admin = null;
     let currentAdminPassword = ''; // kept only in memory while this page is open
 
+    // Basic admin-session protections. No password/admin session is stored in localStorage.
+    const INACTIVITY_LIMIT_MS = 10 * 60 * 1000; // 10 minutes
+    const MAX_LOGIN_ATTEMPTS = 5;
+    const LOGIN_LOCK_MS = 5 * 60 * 1000; // 5 minutes
+    let inactivityTimer = null;
+
+    function clearSensitiveState() {
+      currentAdminPassword = '';
+      admin = null;
+      current = null;
+      active = [];
+      deleted = [];
+      pendingExcelRows = [];
+      pendingExcelHash = '';
+      pendingExcelName = '';
+    }
+
+    function secureLogout(message = '') {
+      clearTimeout(inactivityTimer);
+      inactivityTimer = null;
+      clearSensitiveState();
+      const form = document.getElementById('loginForm');
+      if (form) form.reset();
+      document.getElementById('loginView').classList.remove('hidden');
+      document.getElementById('adminView').classList.add('hidden');
+      document.getElementById('loginMsg').textContent = message;
+    }
+
+    function resetInactivityTimer() {
+      if (!admin) return;
+      clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(() => {
+        secureLogout('Session expired after 10 minutes of inactivity. Please sign in again.');
+      }, INACTIVITY_LIMIT_MS);
+    }
+
+    ['click','keydown','mousemove','touchstart','scroll'].forEach(evt => {
+      document.addEventListener(evt, resetInactivityTimer, { passive: true });
+    });
+
+    function getLoginGuard() {
+      try {
+        return JSON.parse(sessionStorage.getItem('facultyAdminLoginGuard') || '{}');
+      } catch {
+        return {};
+      }
+    }
+
+    function setLoginGuard(value) {
+      sessionStorage.setItem('facultyAdminLoginGuard', JSON.stringify(value));
+    }
+
+    function registerFailedLogin() {
+      const now = Date.now();
+      const guard = getLoginGuard();
+      let attempts = Number(guard.attempts || 0) + 1;
+      let lockedUntil = Number(guard.lockedUntil || 0);
+      if (attempts >= MAX_LOGIN_ATTEMPTS) {
+        lockedUntil = now + LOGIN_LOCK_MS;
+        attempts = 0;
+      }
+      setLoginGuard({ attempts, lockedUntil });
+      return lockedUntil;
+    }
+
+    function clearLoginGuard() {
+      sessionStorage.removeItem('facultyAdminLoginGuard');
+    }
+    let pendingExcelRows = [];
+    let pendingExcelHash = '';
+    let pendingExcelName = '';
+    let pendingExcelAlreadyImported = false;
+
     const fields = [
       ['name', 'Name', 'text'],
       ['email', 'Email', 'email'],
@@ -541,10 +647,7 @@
     const fmt = value => value ? new Date(value).toLocaleString('en-GB') : '—';
 
     function showLogin(message = '') {
-      admin = null;
-      document.getElementById('loginView').classList.remove('hidden');
-      document.getElementById('adminView').classList.add('hidden');
-      document.getElementById('loginMsg').textContent = message;
+      secureLogout(message);
     }
 
     function showAdmin() {
@@ -561,6 +664,14 @@
       const password = document.getElementById('loginPassword').value;
       const loginMsg = document.getElementById('loginMsg');
 
+      const guard = getLoginGuard();
+      const now = Date.now();
+      if (Number(guard.lockedUntil || 0) > now) {
+        const seconds = Math.ceil((guard.lockedUntil - now) / 1000);
+        loginMsg.textContent = `Too many failed attempts. Try again in ${seconds} seconds.`;
+        return;
+      }
+
       loginMsg.textContent = 'Signing in…';
 
       const { data, error } = await db.rpc('verify_admin_login', {
@@ -569,19 +680,27 @@
       });
 
       if (error) {
-        loginMsg.textContent = error.message;
+        registerFailedLogin();
+        loginMsg.textContent = 'Login failed. Please check your credentials and try again.';
+        document.getElementById('loginPassword').value = '';
         return;
       }
 
       if (!data || !data.length) {
-        loginMsg.textContent = 'Invalid User ID or Password.';
+        const lockedUntil = registerFailedLogin();
+        loginMsg.textContent = lockedUntil > Date.now()
+          ? 'Too many failed attempts. Login is locked for 5 minutes.'
+          : 'Invalid User ID or Password.';
+        document.getElementById('loginPassword').value = '';
         return;
       }
 
+      clearLoginGuard();
       admin = data[0];
       currentAdminPassword = password;
       loginMsg.textContent = '';
       showAdmin();
+      resetInactivityTimer();
 
       try {
         await logActivity('login', '', 'Admin login');
@@ -592,10 +711,20 @@
     });
 
     document.getElementById('logoutBtn').addEventListener('click', () => {
-      document.getElementById('loginForm').reset();
-      currentAdminPassword = '';
-      showLogin();
+      secureLogout('You have been signed out.');
     });
+
+    // Refresh, pasted URL, reopened page, or browser back/forward cache always requires a fresh login.
+    window.addEventListener('pageshow', event => {
+      if (event.persisted) secureLogout('For security, please sign in again.');
+    });
+    window.addEventListener('pagehide', clearSensitiveState);
+    window.addEventListener('beforeunload', clearSensitiveState);
+
+    // Strip query/hash data so credentials/tokens cannot accidentally remain in the address bar/history.
+    if (location.search || location.hash) {
+      history.replaceState(null, document.title, location.pathname);
+    }
 
     async function refresh() {
       const { data, error } = await db
@@ -947,6 +1076,258 @@
         </div>
       `).join('') || '<p>No activity yet.</p>';
     }
+
+    const REQUIRED_CONSENT = 'I consent to my data being used for the stated purposes';
+
+    function cleanExcelValue(value) {
+      if (value === null || value === undefined) return '';
+      return String(value).trim();
+    }
+
+    async function sha256Hex(arrayBuffer) {
+      const digest = await crypto.subtle.digest('SHA-256', arrayBuffer);
+      return Array.from(new Uint8Array(digest))
+        .map(byte => byte.toString(16).padStart(2, '0'))
+        .join('');
+    }
+
+    async function wasExcelAlreadyImported(fileHash) {
+      if (!fileHash) return false;
+      const { data, error } = await db
+        .from('admin_activity_log_simple')
+        .select('id')
+        .eq('action', 'import_excel')
+        .ilike('details', `%file_sha256=${fileHash}%`)
+        .limit(1);
+      if (error) throw error;
+      return !!(data && data.length);
+    }
+
+    function excelDateToISO(value) {
+      if (!value) return null;
+      if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString();
+      if (typeof value === 'number') {
+        const parsed = XLSX.SSF.parse_date_code(value);
+        if (parsed) {
+          const dt = new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d, parsed.H || 0, parsed.M || 0, Math.floor(parsed.S || 0)));
+          return dt.toISOString();
+        }
+      }
+      const dt = new Date(value);
+      return Number.isNaN(dt.getTime()) ? null : dt.toISOString();
+    }
+
+    function normaliseExcelRow(row, rowNumber) {
+      const values = Array.isArray(row) ? row : [];
+      const email = cleanExcelValue(values[3]).toLowerCase();
+      const consent = cleanExcelValue(values[16]);
+      const now = new Date().toISOString();
+      return {
+        _rowNumber: rowNumber,
+        _validConsent: consent === REQUIRED_CONSENT,
+        email,
+        name: cleanExcelValue(values[4]) || null,
+        department: cleanExcelValue(values[6]) || null,
+        research_groups: cleanExcelValue(values[7]) || null,
+        keywords: cleanExcelValue(values[8]) || null,
+        showcase_interest: cleanExcelValue(values[9]) || null,
+        ai_research: cleanExcelValue(values[10]) || null,
+        enterprise_projects: cleanExcelValue(values[11]) || null,
+        future_directions: cleanExcelValue(values[12]) || null,
+        external_organisations: cleanExcelValue(values[13]) || null,
+        support_training: cleanExcelValue(values[14]) || null,
+        additional_comments: cleanExcelValue(values[15]) || null,
+        consent: consent || null,
+        start_time: excelDateToISO(values[1]) || now,
+        completion_time: excelDateToISO(values[2]) || now,
+        last_modified_time: now
+      };
+    }
+
+    function excelRowStatus(row) {
+      if (!row.email) return { text: 'Skipped — no email', kind: 'skip' };
+      if (!row._validConsent) return { text: 'Skipped — consent missing', kind: 'skip' };
+      const existing = [...active, ...deleted].find(item => String(item.email || '').trim().toLowerCase() === row.email);
+      return existing ? { text: 'Update existing', kind: 'update' } : { text: 'Insert new', kind: 'new' };
+    }
+
+    function renderExcelPreview() {
+      let newCount = 0, updateCount = 0, skipCount = 0;
+      const rows = pendingExcelRows.map(row => {
+        const status = excelRowStatus(row);
+        if (status.kind === 'new') newCount++;
+        else if (status.kind === 'update') updateCount++;
+        else skipCount++;
+        return { row, status };
+      });
+
+      document.getElementById('excelSummary').classList.remove('hidden');
+      document.getElementById('excelSummary').innerHTML =
+        `<strong>${pendingExcelRows.length}</strong> data row(s) found · ` +
+        `<strong>${newCount}</strong> new · <strong>${updateCount}</strong> update · <strong>${skipCount}</strong> skipped`;
+
+      document.getElementById('excelPreviewBody').innerHTML = rows.slice(0, 100).map(({ row, status }) => `
+        <tr>
+          <td>${row._rowNumber}</td>
+          <td>${esc(row.name || '')}</td>
+          <td>${esc(row.email || '')}</td>
+          <td>${esc(row.department || '')}</td>
+          <td>${esc(status.text)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="5">No data rows found.</td></tr>';
+
+      document.getElementById('excelPreviewWrap').classList.remove('hidden');
+      document.getElementById('importExcelBtn').classList.toggle('hidden', !rows.some(item => item.status.kind !== 'skip'));
+    }
+
+    document.getElementById('uploadExcelBtn').addEventListener('click', () => {
+      pendingExcelRows = [];
+      pendingExcelHash = '';
+      pendingExcelName = '';
+      pendingExcelAlreadyImported = false;
+      document.getElementById('excelFileInput').value = '';
+      document.getElementById('excelSummary').classList.add('hidden');
+      document.getElementById('excelPreviewWrap').classList.add('hidden');
+      document.getElementById('importExcelBtn').classList.add('hidden');
+      document.getElementById('excelUploadMsg').textContent = '';
+      document.getElementById('excelUploadModal').classList.remove('hidden');
+    });
+
+    document.getElementById('closeExcelUpload').addEventListener('click', () => {
+      document.getElementById('excelUploadModal').classList.add('hidden');
+    });
+
+    document.getElementById('excelFileInput').addEventListener('change', async event => {
+      const file = event.target.files?.[0];
+      const message = document.getElementById('excelUploadMsg');
+      pendingExcelRows = [];
+      document.getElementById('importExcelBtn').classList.add('hidden');
+      if (!file) return;
+
+      message.textContent = 'Reading Excel…';
+      try {
+        const buffer = await file.arrayBuffer();
+        pendingExcelHash = await sha256Hex(buffer);
+        pendingExcelName = file.name || 'Excel file';
+        pendingExcelAlreadyImported = await wasExcelAlreadyImported(pendingExcelHash);
+
+        if (pendingExcelAlreadyImported) {
+          document.getElementById('excelSummary').classList.add('hidden');
+          document.getElementById('excelPreviewWrap').classList.add('hidden');
+          document.getElementById('importExcelBtn').classList.add('hidden');
+          pendingExcelRows = [];
+          message.textContent = 'This exact Excel file has already been imported. Upload blocked to prevent duplicate imports.';
+          return;
+        }
+
+        const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
+        if (!workbook.SheetNames.length) throw new Error('No worksheet was found in this Excel file.');
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: true });
+        if (matrix.length < 2) throw new Error('The Excel file does not contain any faculty data rows.');
+
+        const header = matrix[0].map(value => cleanExcelValue(value).toLowerCase());
+        const emailHeader = header[3] || '';
+        const nameHeader = header[4] || '';
+        if (!emailHeader.includes('email') || !nameHeader.includes('name')) {
+          throw new Error('Excel columns do not match the expected Faculty Microsoft Forms export (Email should be column D and Name column E).');
+        }
+
+        pendingExcelRows = matrix.slice(1)
+          .map((row, index) => normaliseExcelRow(row, index + 2))
+          .filter(row => row.email || row.name || row.department);
+
+        renderExcelPreview();
+        message.textContent = 'Preview ready. Review the rows, then click Import to Database.';
+      } catch (err) {
+        message.textContent = err.message || String(err);
+        pendingExcelRows = [];
+      }
+    });
+
+    document.getElementById('importExcelBtn').addEventListener('click', async () => {
+      const button = document.getElementById('importExcelBtn');
+      const message = document.getElementById('excelUploadMsg');
+      if (!pendingExcelRows.length) return;
+      if (pendingExcelAlreadyImported) {
+        message.textContent = 'This exact Excel file has already been imported. Import blocked.';
+        return;
+      }
+      if (!confirm('Import the previewed Excel rows into the faculty database? Existing emails will be updated, but blank Excel cells will not erase existing database values.')) return;
+
+      button.disabled = true;
+      let inserted = 0, updated = 0, skipped = 0, errors = 0;
+      const errorRows = [];
+
+      for (let i = 0; i < pendingExcelRows.length; i++) {
+        const row = pendingExcelRows[i];
+        message.textContent = `Importing ${i + 1} of ${pendingExcelRows.length}…`;
+
+        if (!row.email || !row._validConsent) {
+          skipped++;
+          continue;
+        }
+
+        const payload = { ...row };
+        delete payload._rowNumber;
+        delete payload._validConsent;
+
+        try {
+          const { data: existingRows, error: lookupError } = await db
+            .from('ai_faculty_data')
+            .select('id,email')
+            .ilike('email', row.email)
+            .limit(1);
+          if (lookupError) throw lookupError;
+
+          const existing = existingRows?.[0];
+          if (existing) {
+            delete payload.start_time;
+            delete payload.completion_time;
+
+            // Safe update: blank Excel cells never overwrite existing database values.
+            const safePayload = {};
+            Object.entries(payload).forEach(([key, value]) => {
+              if (value !== null && value !== undefined && String(value).trim() !== '') {
+                safePayload[key] = value;
+              }
+            });
+            safePayload.is_deleted = false;
+            safePayload.deleted_at = null;
+            safePayload.last_modified_time = new Date().toISOString();
+
+            const { error } = await db
+              .from('ai_faculty_data')
+              .update(safePayload)
+              .eq('id', existing.id);
+            if (error) throw error;
+            updated++;
+          } else {
+            payload.is_deleted = false;
+            const { error } = await db
+              .from('ai_faculty_data')
+              .insert(payload);
+            if (error) throw error;
+            inserted++;
+          }
+        } catch (err) {
+          errors++;
+          errorRows.push(`row ${row._rowNumber}: ${err.message || err}`);
+        }
+      }
+
+      await logActivity(
+        'import_excel',
+        '',
+        `${inserted} inserted, ${updated} updated, ${skipped} skipped, ${errors} error(s); file=${pendingExcelName}; file_sha256=${pendingExcelHash}`
+      );
+      pendingExcelAlreadyImported = true;
+      await refresh();
+      button.disabled = false;
+      message.textContent = `Import complete — New: ${inserted} | Updated: ${updated} | Skipped: ${skipped} | Errors: ${errors}` +
+        (errorRows.length ? ` — ${errorRows.slice(0, 3).join(' ; ')}` : '');
+      renderExcelPreview();
+    });
 
     document.getElementById('exportBtn').addEventListener('click', async () => {
       const rows = filtered().map(row => {
